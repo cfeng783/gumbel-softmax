@@ -1,69 +1,38 @@
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-from keras.layers import Input, Dense, Lambda
-from keras.models import Model, Sequential
+from keras.layers import initializations
+from keras.engine import Layer
 from keras import backend as K
-from keras import objectives
-from keras.datasets import mnist
-from keras.activations import softmax
-from keras.objectives import binary_crossentropy as bce
+import numpy as np
+import tensorflow as tf
 
-batch_size = 100
-data_dim = 784
-M = 10
-N = 30
-nb_epoch = 100
-epsilon_std = 0.01
+def sample_gumbel(shape, eps=1e-20): 
+  """Sample from Gumbel(0, 1)"""
+  U = tf.random_uniform(shape,minval=0,maxval=1)
+  return -tf.log(-tf.log(U + eps) + eps)
 
-anneal_rate = 0.0003
-min_temperature = 0.5
+def gumbel_softmax_sample(logits, temperature): 
+  """ Draw a sample from the Gumbel-Softmax distribution"""
+  y = logits + sample_gumbel(tf.shape(logits))
+  return tf.nn.softmax( y / temperature)
 
-tau = K.variable(5.0, name="temperature")
-x = Input(batch_shape=(batch_size, data_dim))
-h = Dense(256, activation='relu')(Dense(512, activation='relu')(x))
-logits_y = Dense(M*N)(h)
+class GumbelSoftmax(Layer):
+    def __init__(self, temperature, hard=False, **kwargs):
+        self.supports_masking = True
+        self.temperature = temperature
+        self.hard = hard
+        super(GumbelSoftmax, self).__init__(**kwargs)
 
-def sampling(logits_y):
-    U = K.random_uniform(K.shape(logits_y), 0, 1)
-    y = logits_y - K.log(-K.log(U + 1e-20) + 1e-20) # logits + gumbel noise
-    y = softmax(K.reshape(y, (-1, N, M)) / tau)
-    y = K.reshape(y, (-1, N*M))
-    return y
+    def call(self, x, mask=None):
+#         return K.relu(x, alpha=self.alpha)
+        y = gumbel_softmax_sample(x, self.temperature)
+        if self.hard:
+            k = tf.shape(x)[-1]
+#             y_hard = tf.cast(tf.one_hot(tf.argmax(y,1),k), y.dtype)
+            y_hard = tf.cast(tf.equal(y,tf.reduce_max(y,1,keep_dims=True)),y.dtype)
+            y = tf.stop_gradient(y_hard - y) + y
+        return y
 
-z = Lambda(sampling, output_shape=(M*N,))(logits_y)
-generator = Sequential()
-generator.add(Dense(256, activation='relu', input_shape=(N*M, )))
-generator.add(Dense(512, activation='relu'))
-generator.add(Dense(data_dim, activation='sigmoid'))
-x_hat = generator(z)
-
-# x_hat = Dense(data_dim, activation='softmax')(Dense(512, activation='relu')(Dense(256, activation='relu')(z)))
-def gumbel_loss(x, x_hat):
-    q_y = K.reshape(logits_y, (-1, N, M))
-    q_y = softmax(q_y)
-    log_q_y = K.log(q_y + 1e-20)
-    kl_tmp = q_y * (log_q_y - K.log(1.0/M))
-    KL = K.sum(kl_tmp, axis=(1, 2))
-    elbo = data_dim * bce(x, x_hat) - KL 
-    return elbo
-
-vae = Model(x, x_hat)
-vae.compile(optimizer='adam', loss=gumbel_loss)
-
-# train the VAE on MNIST digits
-(x_train, y_train), (x_test, y_test) = mnist.load_data()
-
-x_train = x_train.astype('float32') / 255.
-x_test = x_test.astype('float32') / 255.
-x_train = x_train.reshape((len(x_train), np.prod(x_train.shape[1:])))
-x_test = x_test.reshape((len(x_test), np.prod(x_test.shape[1:])))
-
-for e in range(nb_epoch):
-    vae.fit(x_train, x_train,
-        shuffle=True,
-        nb_epoch=1,
-        batch_size=batch_size,
-        validation_data=(x_test, x_test))
-    K.set_value(tau, np.max([K.get_value(tau) * np.exp(- anneal_rate * e), min_temperature]))
+    def get_config(self):
+        config = {'temperature': self.temperature}
+        config = {'hard': self.hard}
+        base_config = super(GumbelSoftmax, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
