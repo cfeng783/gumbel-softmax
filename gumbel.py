@@ -32,7 +32,6 @@ class GumbelSoftmax(Layer):
         return y
 
     def get_config(self):
-        config = {'temperature': self.temperature}
-        config = {'hard': self.hard}
+        config = {'temperature': self.temperature,'hard': self.hard}
         base_config = super(GumbelSoftmax, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
